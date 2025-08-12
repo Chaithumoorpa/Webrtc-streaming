@@ -1,202 +1,201 @@
 package webrtc
 
 import (
-	"log"
-	"sync"
-	"encoding/json"
-	"time"
+    "encoding/json"
+    "log"
+    "sync"
+    "time"
 
-	"github.com/gofiber/websocket/v2"
-	"github.com/pion/rtcp"
-	"github.com/pion/webrtc/v3"
-
+    "github.com/gofiber/websocket/v2"
+    "github.com/pion/rtcp"
+    "github.com/pion/webrtc/v3"
 )
 
+// Global room registry
 var (
-	RoomsLock sync.RWMutex
-	Rooms     map[string]*Room
-	Streams   map[string]*Room
-	ActiveRoomID string
-
+    RoomsLock    sync.RWMutex
+    Rooms        map[string]*Room
+    Streams      map[string]*Room
+    ActiveRoomID string
 )
 
-var (
-	turnConfig = webrtc.Configuration{
-		ICETransportPolicy: webrtc.ICETransportPolicyRelay,
-		ICEServers: []webrtc.ICEServer{
-			{
+// TURN/STUN configuration
+var turnConfig = webrtc.Configuration{
+    ICETransportPolicy: webrtc.ICETransportPolicyRelay,
+    ICEServers: []webrtc.ICEServer{
+        {URLs: []string{"stun:turn.localhost:3478"}},
+        {
+            URLs:           []string{"turn:turn.localhost:3478"},
+            Username:       "akhil",
+            Credential:     "sharma",
+            CredentialType: webrtc.ICECredentialTypePassword,
+        },
+    },
+}
 
-				URLs: []string{"stun:turn.localhost:3478"},
-			},
-			{
-
-				URLs: []string{"turn:turn.localhost:3478"},
-
-				Username: "akhil",
-
-				Credential:     "sharma",
-				CredentialType: webrtc.ICECredentialTypePassword,
-			},
-		},
-	}
-)
-
-
+// Peer management
 type Peers struct {
-	ListLock    sync.RWMutex
-	Connections []PeerConnectionState
-	TrackLocals map[string]*webrtc.TrackLocalStaticRTP
+    Room        *Room
+    ListLock    sync.RWMutex
+    Connections []PeerConnectionState
+    TrackLocals map[string]*webrtc.TrackLocalStaticRTP
 }
 
 type PeerConnectionState struct {
-	PeerConnection *webrtc.PeerConnection
-	Websocket      *ThreadSafeWriter
+    PeerConnection *webrtc.PeerConnection
+    Websocket      *ThreadSafeWriter
+    Role           string
 }
 
 type ThreadSafeWriter struct {
-	Conn  *websocket.Conn
-	Mutex sync.Mutex
+    Conn  *websocket.Conn
+    Mutex sync.Mutex
 }
 
 func (t *ThreadSafeWriter) WriteJSON(v interface{}) error {
-	t.Mutex.Lock()
-	defer t.Mutex.Unlock()
-	return t.Conn.WriteJSON(v)
+    t.Mutex.Lock()
+    defer t.Mutex.Unlock()
+    return t.Conn.WriteJSON(v)
 }
 
-func (p *Peers) AddTrack(t *webrtc.TrackRemote) *webrtc.TrackLocalStaticRTP {
-	p.ListLock.Lock()
-	defer func() {
-		p.ListLock.Unlock()
-		p.SignalPeerConnections()
-	}()
+// Add remote track and trigger sync
+func (p *Peers) AddTrack(t *webrtc.TrackRemote, room *Room) *webrtc.TrackLocalStaticRTP {
+    p.ListLock.Lock()
+    defer func() {
+        p.ListLock.Unlock()
+        p.SignalPeerConnections(room)
+    }()
 
-	trackLocal, err := webrtc.NewTrackLocalStaticRTP(t.Codec().RTPCodecCapability, t.ID(), t.StreamID())
-	if err != nil {
-		log.Println(err.Error())
-		return nil
-	}
+    trackLocal, err := webrtc.NewTrackLocalStaticRTP(t.Codec().RTPCodecCapability, t.ID(), t.StreamID())
+    if err != nil {
+        log.Println("AddTrack error:", err)
+        return nil
+    }
 
-	p.TrackLocals[t.ID()] = trackLocal
-	return trackLocal
+    p.TrackLocals[t.ID()] = trackLocal
+    return trackLocal
 }
 
-func (p *Peers) RemoveTrack(t *webrtc.TrackLocalStaticRTP) {
-	p.ListLock.Lock()
-	defer func() {
-		p.ListLock.Unlock()
-		p.SignalPeerConnections()
-	}()
+// Remove track and trigger sync
+func (p *Peers) RemoveTrack(t *webrtc.TrackLocalStaticRTP, room *Room) {
+    p.ListLock.Lock()
+    defer func() {
+        p.ListLock.Unlock()
+        p.SignalPeerConnections(room)
+    }()
 
-	delete(p.TrackLocals, t.ID())
+    delete(p.TrackLocals, t.ID())
 }
 
-func (p *Peers) SignalPeerConnections() {
-	p.ListLock.Lock()
-	defer func() {
-		p.ListLock.Unlock()
-		p.DispatchKeyFrame()
-	}()
+// Sync peer connections with current tracks
+func (p *Peers) SignalPeerConnections(room *Room) {
+    p.ListLock.Lock()
+    defer func() {
+        p.ListLock.Unlock()
+        p.DispatchKeyFrame()
+    }()
 
-	attemptSync := func() (tryAgain bool) {
-		for i := range p.Connections {
-			if p.Connections[i].PeerConnection.ConnectionState() == webrtc.PeerConnectionStateClosed {
-				p.Connections = append(p.Connections[:i], p.Connections[i+1:]...)
-				log.Println("a", p.Connections)
-				return true
-			}
+    attemptSync := func() bool {
+        for i := range p.Connections {
+            pc := p.Connections[i].PeerConnection
 
-			existingSenders := map[string]bool{}
-			for _, sender := range p.Connections[i].PeerConnection.GetSenders() {
-				if sender.Track() == nil {
-					continue
-				}
+            if pc.ConnectionState() == webrtc.PeerConnectionStateClosed {
+                p.Connections = append(p.Connections[:i], p.Connections[i+1:]...)
+                log.Println("Removed closed connection")
+                return true
+            }
 
-				existingSenders[sender.Track().ID()] = true
+            existingSenders := map[string]bool{}
+            for _, sender := range pc.GetSenders() {
+                if sender.Track() != nil {
+                    existingSenders[sender.Track().ID()] = true
+                    if _, ok := p.TrackLocals[sender.Track().ID()]; !ok {
+                        if err := pc.RemoveTrack(sender); err != nil {
+                            log.Println("RemoveTrack error:", err)
+                            return true
+                        }
+                    }
+                }
+            }
 
-				if _, ok := p.TrackLocals[sender.Track().ID()]; !ok {
-					if err := p.Connections[i].PeerConnection.RemoveTrack(sender); err != nil {
-						return true
-					}
-				}
-			}
+            for _, receiver := range pc.GetReceivers() {
+                if receiver.Track() != nil {
+                    existingSenders[receiver.Track().ID()] = true
+                }
+            }
 
-			for _, receiver := range p.Connections[i].PeerConnection.GetReceivers() {
-				if receiver.Track() == nil {
-					continue
-				}
+            for trackID := range p.TrackLocals {
+                if !existingSenders[trackID] {
+                    if _, err := pc.AddTrack(p.TrackLocals[trackID]); err != nil {
+                        log.Println("AddTrack error:", err)
+                        return true
+                    }
+                }
+            }
 
-				existingSenders[receiver.Track().ID()] = true
-			}
+            offer, err := pc.CreateOffer(nil)
+            if err != nil {
+                log.Println("CreateOffer error:", err)
+                return true
+            }
 
-			for trackID := range p.TrackLocals {
-				if _, ok := existingSenders[trackID]; !ok {
-					if _, err := p.Connections[i].PeerConnection.AddTrack(p.TrackLocals[trackID]); err != nil {
-						return true
-					}
-				}
-			}
+            if err = pc.SetLocalDescription(offer); err != nil {
+                log.Println("SetLocalDescription error:", err)
+                return true
+            }
 
-			offer, err := p.Connections[i].PeerConnection.CreateOffer(nil)
-			if err != nil {
-				return true
-			}
+            offerString, err := json.Marshal(offer)
+            if err != nil {
+                log.Println("Marshal offer error:", err)
+                return true
+            }
 
-			if err = p.Connections[i].PeerConnection.SetLocalDescription(offer); err != nil {
-				return true
-			}
+            room.LastOffer = string(offerString)
+            p.BroadcastTo("viewer", "offer", room.LastOffer)
 
-			offerString, err := json.Marshal(offer)
-			if err != nil {
-				return true
-			}
+            if err = p.Connections[i].Websocket.WriteJSON(&websocketMessage{
+                Event: "offer",
+                Data:  room.LastOffer,
+            }); err != nil {
+                log.Println("Send offer error:", err)
+                return true
+            }
+        }
+        return false
+    }
 
-			if err = p.Connections[i].Websocket.WriteJSON(&websocketMessage{
-				Event: "offer",
-				Data:  string(offerString),
-			}); err != nil {
-				return true
-			}
-		}
+    for attempt := 0; attempt < 25; attempt++ {
+        if !attemptSync() {
+            break
+        }
+    }
 
-		return
-	}
-
-	for syncAttempt := 0; ; syncAttempt++ {
-		if syncAttempt == 25 {
-			go func() {
-				time.Sleep(time.Second * 3)
-				p.SignalPeerConnections()
-			}()
-			return
-		}
-
-		if !attemptSync() {
-			break
-		}
-	}
+    go func() {
+        time.Sleep(3 * time.Second)
+        p.SignalPeerConnections(room)
+    }()
 }
 
+// Request keyframes from all receivers
 func (p *Peers) DispatchKeyFrame() {
-	p.ListLock.Lock()
-	defer p.ListLock.Unlock()
+    p.ListLock.Lock()
+    defer p.ListLock.Unlock()
 
-	for i := range p.Connections {
-		for _, receiver := range p.Connections[i].PeerConnection.GetReceivers() {
-			if receiver.Track() == nil {
-				continue
-			}
-
-			_ = p.Connections[i].PeerConnection.WriteRTCP([]rtcp.Packet{
-				&rtcp.PictureLossIndication{
-					MediaSSRC: uint32(receiver.Track().SSRC()),
-				},
-			})
-		}
-	}
+    for _, conn := range p.Connections {
+        for _, receiver := range conn.PeerConnection.GetReceivers() {
+            if receiver.Track() != nil {
+                _ = conn.PeerConnection.WriteRTCP([]rtcp.Packet{
+                    &rtcp.PictureLossIndication{
+                        MediaSSRC: uint32(receiver.Track().SSRC()),
+                    },
+                })
+            }
+        }
+    }
 }
 
-func (p *Peers) Broadcast(event string, data string) {
+//  Broadcast to all peers
+func (p *Peers) Broadcast(event, data string) {
     p.ListLock.RLock()
     defer p.ListLock.RUnlock()
 
@@ -208,6 +207,22 @@ func (p *Peers) Broadcast(event string, data string) {
     }
 }
 
+// Broadcast to peers by role
+func (p *Peers) BroadcastTo(role, event, data string) {
+    p.ListLock.RLock()
+    defer p.ListLock.RUnlock()
+
+    for _, conn := range p.Connections {
+        if conn.Role == role {
+            _ = conn.Websocket.WriteJSON(&websocketMessage{
+                Event: event,
+                Data:  data,
+            })
+        }
+    }
+}
+
+// Remove closed connections
 func (p *Peers) CleanupClosedConnections() {
     p.ListLock.Lock()
     defer p.ListLock.Unlock()
@@ -221,17 +236,19 @@ func (p *Peers) CleanupClosedConnections() {
     p.Connections = active
 }
 
+// Get connection stats
 func (p *Peers) GetConnectionStats() map[string]interface{} {
     p.ListLock.RLock()
     defer p.ListLock.RUnlock()
+
     return map[string]interface{}{
         "totalConnections": len(p.Connections),
         "activeTracks":     len(p.TrackLocals),
     }
 }
 
-
+// WebSocket message format
 type websocketMessage struct {
-	Event string `json:"event"`
-	Data  string `json:"data"`
+    Event string `json:"event"`
+    Data  string `json:"data"`
 }

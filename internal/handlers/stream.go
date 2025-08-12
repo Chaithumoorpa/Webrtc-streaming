@@ -2,6 +2,7 @@ package handlers
 
 import (
     "fmt"
+    "log"
     "os"
     "time"
 
@@ -10,37 +11,40 @@ import (
     w "webrtc-streaming/pkg/webrtc"
 )
 
-// Stream metadata endpoint (optional)
+// Stream metadata endpoint
 func Stream(c *fiber.Ctx) error {
     suuid := c.Params("suuid")
     if suuid == "" {
-        return c.Status(400).JSON(fiber.Map{"error": "Missing stream ID"})
+        log.Println("Stream: missing stream ID")
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Missing stream ID"})
     }
 
-    ws := "ws"
+    protocol := "ws"
     if os.Getenv("ENVIRONMENT") == "PRODUCTION" {
-        ws = "wss"
+        protocol = "wss"
     }
 
     w.RoomsLock.Lock()
-    room, ok := w.Streams[suuid]
+    stream, ok := w.Streams[suuid]
     w.RoomsLock.Unlock()
 
-    if !ok || room == nil {
-        return c.Status(404).JSON(fiber.Map{
+    if !ok || stream == nil {
+        log.Printf("Stream: stream not found for ID %s\n", suuid)
+        return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
             "streamId": suuid,
             "status":   "not_found",
         })
     }
 
+    log.Printf("Stream: metadata served for stream ID %s\n", suuid)
     return c.JSON(fiber.Map{
         "streamId":        suuid,
         "status":          "active",
         "timestamp":       time.Now().Unix(),
         "hostname":        c.Hostname(),
         "type":            "stream",
-        "streamWebSocket": fmt.Sprintf("%s://%s/stream/%s/websocket", ws, c.Hostname(), suuid),
-        "viewerWebSocket": fmt.Sprintf("%s://%s/stream/%s/viewer/websocket", ws, c.Hostname(), suuid),
+        "streamWebSocket": fmt.Sprintf("%s://%s/stream/%s/websocket", protocol, c.Hostname(), suuid),
+        "viewerWebSocket": fmt.Sprintf("%s://%s/stream/%s/viewer/websocket", protocol, c.Hostname(), suuid),
     })
 }
 
@@ -48,36 +52,46 @@ func Stream(c *fiber.Ctx) error {
 func StreamWebSocket(c *websocket.Conn) {
     suuid := c.Params("suuid")
     if suuid == "" {
+        log.Println("StreamWebSocket: missing stream ID")
         return
     }
 
     w.RoomsLock.Lock()
-    if stream, ok := w.Streams[suuid]; ok {
-        w.RoomsLock.Unlock()
-        w.StreamConn(c, stream.Peers)
+    stream, ok := w.Streams[suuid]
+    w.RoomsLock.Unlock()
+
+    if !ok || stream == nil {
+        log.Printf("StreamWebSocket: stream not found for ID %s\n", suuid)
         return
     }
-    w.RoomsLock.Unlock()
+
+    log.Printf("Broadcaster connected to stream: %s\n", suuid)
+    w.StreamConn(c, stream.Peers, stream)
 }
 
 // WebSocket for viewer
 func StreamViewerWebSocket(c *websocket.Conn) {
     suuid := c.Params("suuid")
     if suuid == "" {
+        log.Println("StreamViewerWebSocket: missing stream ID")
         return
     }
 
     w.RoomsLock.Lock()
-    if stream, ok := w.Streams[suuid]; ok {
-        w.RoomsLock.Unlock()
-        viewerConn(c, stream.Peers)
+    stream, ok := w.Streams[suuid]
+    w.RoomsLock.Unlock()
+
+    if !ok || stream == nil {
+        log.Printf("StreamViewerWebSocket: stream not found for ID %s\n", suuid)
         return
     }
-    w.RoomsLock.Unlock()
+
+    log.Printf("Viewer connected to stream: %s\n", suuid)
+    viewerConn(c, stream.Peers)
 }
 
-// Viewer connection ticker (optional)
-func viewerConn(c *websocket.Conn, p *w.Peers) {
+// Viewer connection ticker
+func viewerConn(c *websocket.Conn, peers *w.Peers) {
     ticker := time.NewTicker(1 * time.Second)
     defer ticker.Stop()
     defer c.Close()
@@ -85,11 +99,17 @@ func viewerConn(c *websocket.Conn, p *w.Peers) {
     for {
         select {
         case <-ticker.C:
-            w, err := c.Conn.NextWriter(websocket.TextMessage)
+            writer, err := c.Conn.NextWriter(websocket.TextMessage)
             if err != nil {
+                log.Println("viewerConn: failed to get writer:", err)
                 return
             }
-            w.Write([]byte(fmt.Sprintf("%d", len(p.Connections))))
+
+            _, err = writer.Write([]byte(fmt.Sprintf("%d", len(peers.Connections))))
+            if err != nil {
+                log.Println("viewerConn: failed to write viewer count:", err)
+                return
+            }
         }
     }
 }

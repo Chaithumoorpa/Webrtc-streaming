@@ -1,16 +1,17 @@
 package handlers
 
 import (
-    "fmt"
-    // "os"
+    "log"
 
     "github.com/gofiber/websocket/v2"
     w "webrtc-streaming/pkg/webrtc"
 )
 
+// WebSocket for broadcaster (victim)
 func DuressWebSocket(c *websocket.Conn) {
     roomID := c.Params("roomId")
     if roomID == "" {
+        log.Println("DuressWebSocket: missing roomId")
         return
     }
 
@@ -19,32 +20,36 @@ func DuressWebSocket(c *websocket.Conn) {
     w.RoomsLock.RUnlock()
 
     if !ok || room == nil {
+        log.Printf("DuressWebSocket: room not found for ID %s\n", roomID)
         return
     }
 
+    log.Printf("Broadcaster connected to room: %s\n", roomID)
     room.Peers.Broadcast("duress-alert", "Duress stream triggered")
-    w.RoomConn(c, room.Peers)
+
+    w.RoomConn(c, room.Peers, room)
 }
 
+// WebSocket for viewer (helper)
 func DuressViewerWebSocket(c *websocket.Conn) {
     roomID := c.Params("roomId")
     if roomID == "" {
-        fmt.Println("Viewer connection rejected: missing roomId")
+        log.Println("DuressViewerWebSocket: missing roomId")
         return
     }
 
-    fmt.Println("Viewer attempting to connect to room:", roomID)
+    log.Printf("Viewer attempting to connect to room: %s\n", roomID)
 
     w.RoomsLock.RLock()
     room, ok := w.Rooms[roomID]
     w.RoomsLock.RUnlock()
 
     if !ok || room == nil {
-        fmt.Println("Viewer connection failed: room not found:", roomID)
+        log.Printf("DuressViewerWebSocket: room not found for ID %s\n", roomID)
         return
     }
 
-    fmt.Println("Viewer WebSocket connected to room:", roomID)
-    w.StreamConn(c, room.Peers)
-    fmt.Println("Viewer WebSocket closed for room:", roomID)
+    log.Printf("Viewer WebSocket connected to room: %s\n", roomID)
+    w.StreamConn(c, room.Peers, room)
+    log.Printf("Viewer WebSocket closed for room: %s\n", roomID)
 }

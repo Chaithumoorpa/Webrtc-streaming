@@ -40,16 +40,15 @@ func StartHelpSession(c *fiber.Ctx) error {
     helpRequests = append(helpRequests, req)
     helpLock.Unlock()
 
-    roomID := uuid.New().String()
-    suuid := fmt.Sprintf("%x", roomID)
-    w.ActiveRoomID = roomID
+    roomID := uuid.NewString()
+    streamID := roomID
 
     peers := &w.Peers{TrackLocals: make(map[string]*webrtc.TrackLocalStaticRTP)}
     room := &w.Room{Peers: peers}
 
     w.RoomsLock.Lock()
     w.Rooms[roomID] = room
-    w.Streams[suuid] = room
+    w.Streams[streamID] = room
     w.RoomsLock.Unlock()
 
     ws := "ws"
@@ -60,7 +59,7 @@ func StartHelpSession(c *fiber.Ctx) error {
     return c.JSON(fiber.Map{
         "status":    "success",
         "roomId":    roomID,
-        "streamId":  suuid,
+        "streamId":  streamID,
         "timestamp": time.Now().Unix(),
         "user": fiber.Map{
             "name":   req.Name,
@@ -95,9 +94,10 @@ func GiveHelp(c *fiber.Ctx) error {
     }
 
     helpLock.Lock()
+    defer helpLock.Unlock()
+
     helpAcknowledgements[requester] = helper
 
-    // Mark matching help request as "closed"
     for i, req := range helpRequests {
         if req.Name == requester {
             helpRequests[i].Status = "closed"
@@ -105,14 +105,15 @@ func GiveHelp(c *fiber.Ctx) error {
         }
     }
 
-    helpLock.Unlock()
     return c.JSON(fiber.Map{"status": "success"})
 }
-
 
 // 4. Check helper assignment + session status
 func ListenForHelper(c *fiber.Ctx) error {
     requester := c.FormValue("name")
+    if requester == "" {
+        return c.Status(400).JSON(fiber.Map{"error": "Missing requester name"})
+    }
 
     helpLock.RLock()
     defer helpLock.RUnlock()
@@ -133,7 +134,7 @@ func ListenForHelper(c *fiber.Ctx) error {
 
     return c.JSON(fiber.Map{
         "helper": helper,
-        "status": "open", // fallback (shouldn’t be used)
+        "status": "open", // fallback
     })
 }
 
@@ -147,6 +148,8 @@ func HelpCompleted(c *fiber.Ctx) error {
     }
 
     helpLock.Lock()
+    defer helpLock.Unlock()
+
     delete(helpAcknowledgements, requester)
 
     for i, req := range helpRequests {
@@ -156,11 +159,10 @@ func HelpCompleted(c *fiber.Ctx) error {
         }
     }
 
-    helpLock.Unlock()
     return c.JSON(fiber.Map{"status": "success"})
 }
 
-// Broadcaster SDP Offer
+// 6. Broadcaster SDP Offer
 func BroadcastSDP(c *fiber.Ctx) error {
     var req struct {
         RoomID string `json:"roomId"`
@@ -175,7 +177,7 @@ func BroadcastSDP(c *fiber.Ctx) error {
     room, ok := w.Rooms[req.RoomID]
     w.RoomsLock.RUnlock()
 
-    if !ok {
+    if !ok || room == nil {
         return c.Status(404).JSON(fiber.Map{"error": "Room not found"})
     }
 
@@ -183,7 +185,7 @@ func BroadcastSDP(c *fiber.Ctx) error {
     return c.JSON(fiber.Map{"status": "success"})
 }
 
-// Broadcaster ICE Candidate
+// 7. Broadcaster ICE Candidate
 func BroadcastCandidate(c *fiber.Ctx) error {
     var req struct {
         RoomID   string `json:"roomId"`
@@ -198,7 +200,7 @@ func BroadcastCandidate(c *fiber.Ctx) error {
     room, ok := w.Rooms[req.RoomID]
     w.RoomsLock.RUnlock()
 
-    if !ok {
+    if !ok || room == nil {
         return c.Status(404).JSON(fiber.Map{"error": "Room not found"})
     }
 
@@ -206,7 +208,7 @@ func BroadcastCandidate(c *fiber.Ctx) error {
     return c.JSON(fiber.Map{"status": "success"})
 }
 
-// Viewer SDP Answer
+// 8. Viewer SDP Answer
 func ViewerSDP(c *fiber.Ctx) error {
     var req struct {
         RoomID string `json:"roomId"`
@@ -221,7 +223,7 @@ func ViewerSDP(c *fiber.Ctx) error {
     room, ok := w.Rooms[req.RoomID]
     w.RoomsLock.RUnlock()
 
-    if !ok {
+    if !ok || room == nil {
         return c.Status(404).JSON(fiber.Map{"error": "Room not found"})
     }
 
@@ -229,7 +231,7 @@ func ViewerSDP(c *fiber.Ctx) error {
     return c.JSON(fiber.Map{"status": "success"})
 }
 
-// Viewer ICE Candidate
+// 9. Viewer ICE Candidate
 func ViewerCandidate(c *fiber.Ctx) error {
     var req struct {
         RoomID   string `json:"roomId"`
@@ -244,7 +246,7 @@ func ViewerCandidate(c *fiber.Ctx) error {
     room, ok := w.Rooms[req.RoomID]
     w.RoomsLock.RUnlock()
 
-    if !ok {
+    if !ok || room == nil {
         return c.Status(404).JSON(fiber.Map{"error": "Room not found"})
     }
 

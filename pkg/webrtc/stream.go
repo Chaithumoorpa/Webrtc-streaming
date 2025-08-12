@@ -10,25 +10,26 @@ import (
     "github.com/pion/webrtc/v3"
 )
 
-func StreamConn(c *websocket.Conn, p *Peers) {
-    var config webrtc.Configuration
+// Handles a viewer connection to a WebRTC stream
+func StreamConn(c *websocket.Conn, p *Peers, room *Room) {
+    config := webrtc.Configuration{}
     if os.Getenv("ENVIRONMENT") == "PRODUCTION" {
         config = turnConfig
     }
 
     peerConnection, err := webrtc.NewPeerConnection(config)
     if err != nil {
-        log.Print("Failed to create PeerConnection:", err)
+        log.Println("PeerConnection creation failed:", err)
         return
     }
     defer peerConnection.Close()
 
-    // Add transceivers for receiving video and audio
+    // Add transceivers for video and audio
     for _, typ := range []webrtc.RTPCodecType{webrtc.RTPCodecTypeVideo, webrtc.RTPCodecTypeAudio} {
         if _, err := peerConnection.AddTransceiverFromKind(typ, webrtc.RTPTransceiverInit{
             Direction: webrtc.RTPTransceiverDirectionRecvonly,
         }); err != nil {
-            log.Print("Failed to add transceiver:", err)
+            log.Println("AddTransceiver error:", err)
             return
         }
     }
@@ -39,12 +40,13 @@ func StreamConn(c *websocket.Conn, p *Peers) {
             Conn:  c,
             Mutex: sync.Mutex{},
         },
+        Role: "viewer",
     }
 
+    // Register viewer
     p.ListLock.Lock()
     p.Connections = append(p.Connections, newPeer)
     p.ListLock.Unlock()
-
     log.Printf("New viewer connected. Total viewers: %d", len(p.Connections))
 
     // Handle ICE candidates
@@ -53,68 +55,71 @@ func StreamConn(c *websocket.Conn, p *Peers) {
             return
         }
 
-        candidateString, err := json.Marshal(i.ToJSON())
+        candidateJSON, err := json.Marshal(i.ToJSON())
         if err != nil {
-            log.Println("Failed to marshal ICE candidate:", err)
+            log.Println("ICE candidate marshal error:", err)
             return
         }
 
-        if writeErr := newPeer.Websocket.WriteJSON(&websocketMessage{
+        if err := newPeer.Websocket.WriteJSON(&websocketMessage{
             Event: "candidate",
-            Data:  string(candidateString),
-        }); writeErr != nil {
-            log.Println("Failed to send ICE candidate:", writeErr)
+            Data:  string(candidateJSON),
+        }); err != nil {
+            log.Println("Send candidate error:", err)
         }
     })
 
     // Monitor connection state
     peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-        log.Printf("Viewer connection state: %s", state.String())
+        log.Printf("Viewer connection state changed: %s", state.String())
+
         switch state {
         case webrtc.PeerConnectionStateFailed:
             if err := peerConnection.Close(); err != nil {
-                log.Print("Error closing failed connection:", err)
+                log.Println("Failed connection close error:", err)
             }
         case webrtc.PeerConnectionStateClosed:
-            p.SignalPeerConnections()
+            p.SignalPeerConnections(room)
         }
     })
 
-    // Trigger offer to sync tracks
-    p.SignalPeerConnections()
+    // Sync tracks with viewer
+    p.SignalPeerConnections(room)
 
-    // Handle incoming signaling messages
-    message := &websocketMessage{}
+    // Handle incoming WebSocket messages
     for {
         _, raw, err := c.ReadMessage()
         if err != nil {
             log.Println("WebSocket read error:", err)
             return
-        } else if err := json.Unmarshal(raw, &message); err != nil {
-            log.Println("Failed to unmarshal WebSocket message:", err)
+        }
+
+        var message websocketMessage
+        if err := json.Unmarshal(raw, &message); err != nil {
+            log.Println("WebSocket message unmarshal error:", err)
             return
         }
 
         switch message.Event {
         case "candidate":
-            candidate := webrtc.ICECandidateInit{}
+            var candidate webrtc.ICECandidateInit
             if err := json.Unmarshal([]byte(message.Data), &candidate); err != nil {
-                log.Println("Failed to parse ICE candidate:", err)
+                log.Println("Candidate unmarshal error:", err)
                 return
             }
             if err := peerConnection.AddICECandidate(candidate); err != nil {
-                log.Println("Failed to add ICE candidate:", err)
+                log.Println("AddICECandidate error:", err)
                 return
             }
 
         case "answer":
-            answer := webrtc.SessionDescription{}
+            var answer webrtc.SessionDescription
             if err := json.Unmarshal([]byte(message.Data), &answer); err != nil {
-                log.Println("Failed to parse SDP answer:", err)
+                log.Println("Answer unmarshal error:", err)
                 return
             }
             if err := peerConnection.SetRemoteDescription(answer); err != nil {
-                log.Println("Failed to set remote description:", err)
+                log.Println("SetRemoteDescription error:", err)
                 return
             }
 
@@ -122,7 +127,7 @@ func StreamConn(c *websocket.Conn, p *Peers) {
             log.Println("Viewer requested duress termination")
             peerConnection.Close()
             return
-
         }
     }
 }
+
