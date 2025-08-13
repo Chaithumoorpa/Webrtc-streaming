@@ -1,55 +1,59 @@
 package handlers
 
 import (
-    "log"
+	"fmt"
+	"log"
 
-    "github.com/gofiber/websocket/v2"
-    w "webrtc-streaming/pkg/webrtc"
+	"github.com/gofiber/websocket/v2"
+	w "webrtc-streaming/pkg/webrtc"
 )
 
-// WebSocket for broadcaster (victim)
+// WS /duress/:roomId/websocket
+// Broadcaster (victim) WebSocket: publishes media into the room
 func DuressWebSocket(c *websocket.Conn) {
-    roomID := c.Params("roomId")
-    if roomID == "" {
-        log.Println("DuressWebSocket: missing roomId")
-        return
-    }
+	roomID := c.Params("roomId")
+	if roomID == "" {
+		log.Println("DuressWebSocket: missing roomId")
+		return
+	}
 
-    w.RoomsLock.RLock()
-    room, ok := w.Rooms[roomID]
-    w.RoomsLock.RUnlock()
+	w.RoomsLock.RLock()
+	room, ok := w.Rooms[roomID]
+	w.RoomsLock.RUnlock()
 
-    if !ok || room == nil {
-        log.Printf("DuressWebSocket: room not found for ID %s\n", roomID)
-        return
-    }
+	if !ok || room == nil {
+		log.Printf("DuressWebSocket: room not found for ID %s\n", roomID)
+		return
+	}
 
-    log.Printf("Broadcaster connected to room: %s\n", roomID)
-    room.Peers.Broadcast("duress-alert", "Duress stream triggered")
+	log.Printf("Broadcaster connected to duress room: %s\n", roomID)
+	// Optional: notify any connected viewers
+	room.Peers.Broadcast("duress-alert", fmt.Sprintf("Duress stream triggered for room %s", roomID))
 
-    w.RoomConn(c, room.Peers, room)
+	// Broadcaster handler: creates PC, receives remote track(s), rebroadcasts to viewers
+	w.RoomConn(c, room.Peers, room)
 }
 
-// WebSocket for viewer (helper)
+// WS /duress/:roomId/viewer/websocket
+// Viewer (helper) WebSocket: subscribes to the room media
 func DuressViewerWebSocket(c *websocket.Conn) {
-    roomID := c.Params("roomId")
-    if roomID == "" {
-        log.Println("DuressViewerWebSocket: missing roomId")
-        return
-    }
+	roomID := c.Params("roomId")
+	if roomID == "" {
+		log.Println("DuressViewerWebSocket: missing roomId")
+		return
+	}
 
-    log.Printf("Viewer attempting to connect to room: %s\n", roomID)
+	w.RoomsLock.RLock()
+	room, ok := w.Rooms[roomID]
+	w.RoomsLock.RUnlock()
 
-    w.RoomsLock.RLock()
-    room, ok := w.Rooms[roomID]
-    w.RoomsLock.RUnlock()
+	if !ok || room == nil {
+		log.Printf("DuressViewerWebSocket: room not found for ID %s\n", roomID)
+		return
+	}
 
-    if !ok || room == nil {
-        log.Printf("DuressViewerWebSocket: room not found for ID %s\n", roomID)
-        return
-    }
-
-    log.Printf("Viewer WebSocket connected to room: %s\n", roomID)
-    w.StreamConn(c, room.Peers, room)
-    log.Printf("Viewer WebSocket closed for room: %s\n", roomID)
+	log.Printf("Viewer connected to duress room: %s\n", roomID)
+	// Viewer handler: handles offer/answer exchange and ICE with the viewer peer
+	w.StreamConn(c, room.Peers, room)
+	log.Printf("Viewer WebSocket closed for room: %s\n", roomID)
 }

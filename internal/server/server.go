@@ -44,6 +44,8 @@ func Run() error {
     app.Post("/duress/give_help", handlers.GiveHelp)                // Acknowledge help
     app.Post("/duress/listen_for_helper", handlers.ListenForHelper) // Get assigned helper
     app.Post("/duress/help_completed", handlers.HelpCompleted)      // Mark help as done
+    app.Get("/duress/session_info", handlers.SessionInfo)
+
 
     // WebRTC Signaling APIs (for Kotlin clients)
     app.Post("/duress/broadcast/sdp", handlers.BroadcastSDP)
